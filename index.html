@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>极简赛车原型 | Minimal Racer</title>
+    <style>
+        /* ================= 美学基础设定 ================= */
+        :root {
+            --bg-color: #070709; /* 深空黑，不使用纯黑以保留层次 */
+            --grid-color: rgba(255, 255, 255, 0.05);
+            --car-color: #ffffff;
+            --neon-accent: #00f3ff; /* 电光蓝，用于常态高转速 */
+            --neon-boost: #ff0055; /* 霓虹粉/红，用于爆发状态 */
+            --glass-bg: rgba(255, 255, 255, 0.03);
+            --glass-border: rgba(255, 255, 255, 0.08);
+        }
+
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden; /* 禁止滚动 */
+            background-color: var(--bg-color);
+            font-family: sans-serif;
+        }
+
+        /* 游戏画布 */
+        #gameCanvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+
+        /* ================= 玻璃拟物化 UI 层 (Zero UI) ================= */
+        #ui-layer {
+            position: absolute;
+            bottom: 40px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 10;
+            
+            /* 玻璃拟物化核心特效 */
+            background: var(--glass-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--glass-border);
+            border-radius: 24px;
+            
+            padding: 20px 40px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            transition: all 0.2s ease-out;
+        }
+
+        /* 纯几何状态指示器 */
+        
+        /* 1. 速度条 (极细的线段) */
+        .speed-track {
+            width: 200px;
+            height: 2px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 2px;
+            position: relative;
+            overflow: hidden;
+        }
+        .speed-fill {
+            position: absolute;
+            top: 0;
+            left: 50%;
+            height: 100%;
+            width: 0%;
+            background: var(--car-color);
+            transform: translateX(-50%);
+            transition: width 0.1s linear, background-color 0.3s ease;
+            box-shadow: 0 0 10px var(--car-color);
+        }
+
+        /* 2. 转向反馈 (滑动的小点) */
+        .steer-track {
+            width: 100px;
+            height: 12px;
+            border-radius: 6px;
+            border: 1px solid var(--glass-border);
+            position: relative;
+        }
+        .steer-dot {
+            position: absolute;
+            top: 2px;
+            left: 50%; /* 默认居中 */
+            width: 6px;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.5);
+            border-radius: 50%;
+            transform: translateX(-50%);
+            transition: left 0.1s ease-out;
+        }
+
+        /* 3. 氮气/能量核心 (形变几何) */
+        .boost-core {
+            width: 16px;
+            height: 16px;
+            background: transparent;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%; /* 满能量变方，释放时发光 */
+            transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        .boost-core.charging {
+            border-radius: 4px;
+            border-color: var(--neon-accent);
+            box-shadow: 0 0 8px var(--neon-accent);
+            transform: rotate(45deg);
+        }
+
+        .boost-core.active {
+            background: var(--neon-boost);
+            border-color: var(--neon-boost);
+            box-shadow: 0 0 20px var(--neon-boost);
+            transform: scale(1.5) rotate(90deg);
+        }
+
+        /* 操作提示层 (仅开局显示) */
+        #hint {
+            position: absolute;
+            top: 20px;
+            width: 100%;
+            text-align: center;
+            color: rgba(255,255,255,0.3);
+            letter-spacing: 2px;
+            font-size: 12px;
+            z-index: 5;
+            pointer-events: none;
+            transition: opacity 1s;
+        }
+
+    </style>
+</head>
+<body>
+
+    <div id="hint">WASD / 方向键控制移动 | 空格键触发霓虹冲击 (Boost)</div>
+
+    <!-- WebGL太重，2D Canvas足以表现极简几何和发光美学 -->
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- 零文本的玻璃拟物化 UI -->
+    <div id="ui-layer">
+        <div class="speed-track"><div class="speed-fill" id="ui-speed"></div></div>
+        <div class="steer-track"><div class="steer-dot" id="ui-steer"></div></div>
+        <div class="boost-core" id="ui-boost"></div>
+    </div>
+
+<script>
+    /**
+     * ================= 游戏引擎核心设定 =================
+     */
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    // UI DOM 元素
+    const uiSpeed = document.getElementById('ui-speed');
+    const uiSteer = document.getElementById('ui-steer');
+    const uiBoost = document.getElementById('ui-boost');
+    const uiLayer = document.getElementById('ui-layer');
+    const hint = document.getElementById('hint');
+
+    let width, height;
+    function resize() {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        canvas.width = width;
+        canvas.height = height;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // 颜色配置
+    const colors = {
+        car: '#ffffff',
+        accent: '#00f3ff', // 电光蓝
+        boost: '#ff0055'   // 霓虹红
+    };
+
+    /**
+     * ================= 实体定义 =================
+     */
+
+    // 键盘状态
+    const keys = {
+        ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false,
+        w: false, a: false, s: false, d: false, ' ': false
+    };
+
+    // 赛车物理模型 (Top-down 俯视视角)
+    const car = {
+        x: 0,
+        y: 0,
+        radius: 12, // 极简圆形
+        angle: -Math.PI / 2, // 车头朝上
+        velocity: 0,
+        maxSpeed: 15,
+        acceleration: 0.4,
+        friction: 0.95, // 摩擦力
+        turnSpeed: 0.08,
+        
+        boostEnergy: 100, // 0-100
+        isBoosting: false,
+        
+        // 用于形变动画 (Squash and Stretch)
+        stretch: 1 
+    };
+
+    // 粒子系统 (用于尾气流光)
+    let particles = [];
+
+    class Particle {
+        constructor(x, y, vx, vy, color, life, isBoost) {
+            this.x = x;
+            this.y = y;
+            this.vx = vx;
+            this.vy = vy;
+            this.color = color;
+            this.life = life;
+            this.maxLife = life;
+            this.size = isBoost ? 4 : 2; // Boost时粒子更大（方形）
+            this.isBoost = isBoost;
+        }
+
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.life -= 1;
+        }
+
+        draw(ctx) {
+            const alpha = this.life / this.maxLife;
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            ctx.fillStyle = this.color;
+            ctx.shadowBlur = this.isBoost ? 15 : 5;
+            ctx.shadowColor = this.color;
+            
+            // 极限状态画矩形，常态画极简线段
+            if (this.isBoost) {
+                ctx.translate(this.x, this.y);
+                ctx.rotate(Math.random() * Math.PI); // 增加混沌感
+                ctx.fillRect(-this.size/2, -this.size/2, this.size, this.size);
+            } else {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.restore();
+        }
+    }
+
+    // 监听输入
+    window.addEventListener('keydown', (e) => { 
+        if(keys.hasOwnProperty(e.key)) keys[e.key] = true; 
+        hint.style.opacity = '0'; // 隐藏提示
+    });
+    window.addEventListener('keyup', (e) => { 
+        if(keys.hasOwnProperty(e.key)) keys[e.key] = false; 
+    });
+
+    /**
+     * ================= 核心逻辑循环 =================
+     */
+    
+    // 摄像机/视角
+    let camera = { x: 0, y: 0, zoom: 1 };
+
+    function update() {
+        // 1. 物理输入结算
+        const up = keys.ArrowUp || keys.w;
+        const down = keys.ArrowDown || keys.s;
+        const left = keys.ArrowLeft || keys.a;
+        const right = keys.ArrowRight || keys.d;
+        const space = keys[' '];
+
+        // 转向 (仅在有速度时允许转向)
+        if (Math.abs(car.velocity) > 0.5) {
+            let turnDir = car.velocity > 0 ? 1 : -1; // 倒车时反向
+            if (left) car.angle -= car.turnSpeed * turnDir;
+            if (right) car.angle += car.turnSpeed * turnDir;
+        }
+
+        // 动力与 Boost 系统
+        let currentMaxSpeed = car.maxSpeed;
+        car.isBoosting = false;
+
+        if (space && car.boostEnergy > 0 && up) {
+            car.isBoosting = true;
+            currentMaxSpeed = car.maxSpeed * 1.8;
+            car.velocity += car.acceleration * 1.5;
+            car.boostEnergy -= 2; // 消耗能量
+        } else {
+            // 恢复能量
+            if (car.boostEnergy < 100) car.boostEnergy += 0.2;
+            
+            if (up) car.velocity += car.acceleration;
+            else if (down) car.velocity -= car.acceleration;
+        }
+
+        // 应用阻力与极速限制
+        car.velocity *= car.friction;
+        if (car.velocity > currentMaxSpeed) car.velocity = currentMaxSpeed;
+        if (car.velocity < -car.maxSpeed / 2) car.velocity = -car.maxSpeed / 2;
+
+        // 更新位置
+        car.x += Math.cos(car.angle) * car.velocity;
+        car.y += Math.sin(car.angle) * car.velocity;
+
+        // 根据速度产生物理形变 (拉伸)
+        const speedRatio = Math.abs(car.velocity) / car.maxSpeed;
+        car.stretch = 1 + (speedRatio * 0.4); // 最高拉伸40%
+
+        // 生成粒子
+        if (Math.abs(car.velocity) > 2) {
+            // 计算车尾位置
+            const tailX = car.x - Math.cos(car.angle) * car.radius;
+            const tailY = car.y - Math.sin(car.angle) * car.radius;
+            
+            // 基础粒子
+            if (Math.random() < speedRatio) {
+                particles.push(new Particle(
+                    tailX, tailY,
+                    -Math.cos(car.angle) * 2 + (Math.random()-0.5),
+                    -Math.sin(car.angle) * 2 + (Math.random()-0.5),
+                    colors.car, 
+                    20 + Math.random() * 20, 
+                    false
+                ));
+            }
+
+            // 极限状态荧光粒子
+            if (speedRatio > 0.8 || car.isBoosting) {
+                const neonColor = car.isBoosting ? colors.boost : colors.accent;
+                particles.push(new Particle(
+                    tailX + (Math.random()-0.5)*10, 
+                    tailY + (Math.random()-0.5)*10,
+                    -Math.cos(car.angle) * (car.isBoosting ? 8 : 4) + (Math.random()-0.5)*2,
+                    -Math.sin(car.angle) * (car.isBoosting ? 8 : 4) + (Math.random()-0.5)*2,
+                    neonColor, 
+                    15 + Math.random() * 15, 
+                    car.isBoosting
+                ));
+            }
+        }
+
+        // 更新粒子系统
+        particles.forEach(p => p.update());
+        particles = particles.filter(p => p.life > 0);
+
+        // 摄像机追随与动态缩放 (速度越快，视野越广)
+        camera.x += (car.x - camera.x) * 0.1;
+        camera.y += (car.y - camera.y) * 0.1;
+        const targetZoom = car.isBoosting ? 0.7 : (1 - (speedRatio * 0.15));
+        camera.zoom += (targetZoom - camera.zoom) * 0.05;
+
+        // 2. 更新 DOM UI (无字反馈)
+        updateUI(speedRatio, left, right, car.isBoosting, car.boostEnergy);
+    }
+
+    function updateUI(speedRatio, left, right, isBoosting, energy) {
+        // 速度细线扩展
+        uiSpeed.style.width = `${Math.min(speedRatio * 100, 100)}%`;
+        
+        // 色彩反馈
+        if (isBoosting) {
+            uiSpeed.style.backgroundColor = colors.boost;
+            uiSpeed.style.boxShadow = `0 0 15px ${colors.boost}`;
+            uiLayer.style.borderColor = `rgba(255, 0, 85, 0.4)`; // 面板边缘变红
+        } else if (speedRatio > 0.85) {
+            uiSpeed.style.backgroundColor = colors.accent;
+            uiSpeed.style.boxShadow = `0 0 10px ${colors.accent}`;
+            uiLayer.style.borderColor = varCss('--glass-border');
+        } else {
+            uiSpeed.style.backgroundColor = colors.car;
+            uiSpeed.style.boxShadow = `0 0 5px ${colors.car}`;
+            uiLayer.style.borderColor = varCss('--glass-border');
+        }
+
+        // 转向点位移动
+        let steerPos = 50;
+        if (left) steerPos = 20;
+        if (right) steerPos = 80;
+        uiSteer.style.left = `${steerPos}%`;
+
+        // Boost 核心几何变化
+        if (isBoosting) {
+            uiBoost.className = 'boost-core active';
+        } else if (energy > 98) {
+            uiBoost.className = 'boost-core charging'; // 充满电变为菱形
+        } else {
+            uiBoost.className = 'boost-core';
+            // 能量越低，透明度越低
+            uiBoost.style.borderColor = `rgba(255, 255, 255, ${0.1 + (energy/100)*0.4})`;
+        }
+    }
+
+    function varCss(name) {
+        return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    }
+
+    /**
+     * ================= 渲染引擎 =================
+     */
+    function draw() {
+        // 深色背景清理 (带轻微的拖影以增加动感)
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.fillStyle = car.isBoosting ? 'rgba(7, 7, 9, 0.7)' : 'rgba(7, 7, 9, 1)';
+        ctx.fillRect(0, 0, width, height);
+
+        ctx.save();
+        
+        // 摄像机变换
+        ctx.translate(width / 2, height / 2);
+        ctx.scale(camera.zoom, camera.zoom);
+        ctx.translate(-camera.x, -camera.y);
+
+        // 绘制无限网格地面 (利用取模运算创造无尽感)
+        ctx.strokeStyle = varCss('--grid-color');
+        ctx.lineWidth = 1;
+        const gridSize = 100;
+        const offsetX = camera.x % gridSize;
+        const offsetY = camera.y % gridSize;
+        
+        // 扩展网格绘制范围以适应缩放
+        const drawDist = (Math.max(width, height) / camera.zoom) / 2 + gridSize;
+
+        ctx.beginPath();
+        for (let x = -drawDist - offsetX; x <= drawDist - offsetX; x += gridSize) {
+            ctx.moveTo(camera.x + x, camera.y - drawDist);
+            ctx.lineTo(camera.x + x, camera.y + drawDist);
+        }
+        for (let y = -drawDist - offsetY; y <= drawDist - offsetY; y += gridSize) {
+            ctx.moveTo(camera.x - drawDist, camera.y + y);
+            ctx.lineTo(camera.x + drawDist, camera.y + y);
+        }
+        ctx.stroke();
+
+        // 使用 lighter 混合模式让霓虹发光叠加
+        ctx.globalCompositeOperation = 'lighter';
+
+        // 绘制粒子系统
+        particles.forEach(p => p.draw(ctx));
+
+        // 绘制赛车 (纯粹几何体 + 物理形变)
+        ctx.save();
+        ctx.translate(car.x, car.y);
+        ctx.rotate(car.angle);
+        
+        // Squash and Stretch 形变
+        ctx.scale(car.stretch, 1 / Math.sqrt(car.stretch));
+
+        // 霓虹发光外发光
+        const speedRatio = Math.abs(car.velocity) / car.maxSpeed;
+        if (car.isBoosting) {
+            ctx.shadowBlur = 30;
+            ctx.shadowColor = colors.boost;
+        } else if (speedRatio > 0.8) {
+            ctx.shadowBlur = 20;
+            ctx.shadowColor = colors.accent;
+        } else {
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = 'rgba(255,255,255,0.5)';
+        }
+
+        // 画圆形本体
+        ctx.beginPath();
+        ctx.arc(0, 0, car.radius, 0, Math.PI * 2);
+        ctx.fillStyle = colors.car;
+        ctx.fill();
+
+        // 车头指示器 (极简刻痕)
+        ctx.fillStyle = varCss('--bg-color');
+        ctx.beginPath();
+        ctx.arc(car.radius * 0.6, 0, 3, 0, Math.PI * 2); // 右侧代表车头 (0度)
+        ctx.fill();
+
+        ctx.restore(); // 结束赛车绘制
+        ctx.restore(); // 结束摄像机变换
+    }
+
+    // 主循环
+    function loop() {
+        update();
+        draw();
+        requestAnimationFrame(loop);
+    }
+
+    // 启动
+    loop();
+
+</script>
+</body>
+</html>
